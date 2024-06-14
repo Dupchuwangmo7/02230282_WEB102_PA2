@@ -1,176 +1,157 @@
-import { Hono } from 'hono';
-import { cors } from 'hono/cors';
-import { PrismaClient, Prisma } from '@prisma/client';
-import { HTTPException } from 'hono/http-exception';
-import { sign } from 'jsonwebtoken';
-import * as bcrypt from 'bcryptjs'; // Correct import
-import { jwt } from 'hono/jwt';
-import type { JwtVariables } from 'hono/jwt';
+import { Hono } from "hono";
+import { cors } from "hono/cors";
+import { PrismaClient, Prisma } from "@prisma/client";
+import { HTTPException } from "hono/http-exception";
+import { sign } from "hono/jwt";
+import axios from "axios";
+import { jwt } from "hono/jwt";
+import type { JwtVariables } from "hono/jwt";
 
 type Variables = JwtVariables;
 
 const app = new Hono<{ Variables: Variables }>();
 const prisma = new PrismaClient();
-const secret = 'mySecretKey';
 
-app.use('/*', cors());
+const SECRET_KEY = "mySecretKey";
 
-app.use(
-  '/protected/*',
-  jwt({
-    secret: secret,
-  })
-);
+app.use("/*", cors());
 
-// User registration
-app.post('/register', async (c) => {
+app.use("/protected/*", jwt({ secret: SECRET_KEY }));
+
+// Endpoint for registration
+app.post("/register", async (c) => {
+  const { email, password } = await c.req.json();
+
   try {
-    const body = await c.req.json();
-    const hashedPassword = await bcrypt.hash(body.password, 10);
+    const hashedPassword = await Bun.password.hash(password, {
+      algorithm: "bcrypt",
+      cost: 4,
+    });
 
     const user = await prisma.user.create({
-      data: {
-        email: body.email,
-        password: hashedPassword,
-      },
+      data: { email, hashedPassword },
     });
 
     return c.json({ message: `${user.email} created successfully` });
   } catch (e) {
-    if (e instanceof Prisma.PrismaClientKnownRequestError) {
-      if (e.code === 'P2002') {
-        return c.json({ message: 'Email already exists' }, 409);
-      }
+    if (e instanceof Prisma.PrismaClientKnownRequestError && e.code === "P2002") {
+      return c.json({ message: "Email already exists" });
     }
-    throw new HTTPException(500, { message: 'Internal server error' });
+    throw new HTTPException(500, { message: "Internal Server Error" });
   }
 });
 
-// User login
-app.post('/login', async (c) => {
+// Endpoint for login
+app.post("/login", async (c) => {
+  const { email, password } = await c.req.json();
+
+  const user = await prisma.user.findUnique({
+    where: { email },
+    select: { id: true, hashedPassword: true },
+  });
+
+  if (!user) {
+    return c.json({ message: "User not found" }, 404);
+  }
+
+  const isMatch = await Bun.password.verify(password, user.hashedPassword, "bcrypt");
+
+  if (isMatch) {
+    const payload = { sub: user.id, exp: Math.floor(Date.now() / 1000) + 60 * 60 }; // Token expires in 60 minutes
+    const token = await sign(payload, SECRET_KEY);
+
+    return c.json({ message: "Login successful", token });
+  } else {
+    throw new HTTPException(401, { message: "Invalid credentials" });
+  }
+});
+
+// Endpoint to get Pokémon data
+app.get("/pokemon/:name", async (c) => {
+  const { name } = c.req.param();
+
   try {
-    const body = await c.req.json();
-    const user = await prisma.user.findUnique({
-      where: { email: body.email },
+    const response = await axios.get(`https://pokeapi.co/api/v2/pokemon/${name}`);
+    return c.json({ data: response.data });
+  } catch (error: unknown) {
+    if (axios.isAxiosError(error)) {
+      if (error.response?.status === 404) {
+        return c.json({ message: "Your Pokémon was not found!" }, 404);
+      }
+      return c.json({ message: "An error occurred while fetching the Pokémon data" }, 500);
+    } else {
+      return c.json({ message: "An unexpected error occurred" }, 500);
+    }
+  }
+});
+
+// Endpoint to catch Pokémon and save to database
+app.post("/protected/catch", async (c) => {
+  const payload = c.get("jwtPayload");
+  if (!payload) throw new HTTPException(401, { message: "YOU ARE UNAUTHORIZED" });
+
+  const { name: pokemonName } = await c.req.json();
+  if (!pokemonName) throw new HTTPException(400, { message: "Pokemon name is required" });
+
+  try {
+    let pokemon = await prisma.pokemon.findUnique({ where: { name: pokemonName } });
+    if (!pokemon) {
+      pokemon = await prisma.pokemon.create({ data: { name: pokemonName } });
+    }
+
+    const caughtPokemon = await prisma.caughtPokemon.create({
+      data: { userId: payload.sub, pokemonId: pokemon.id },
     });
 
-    if (!user) {
-      return c.json({ message: 'User not found' }, 404);
-    }
-
-    const match = await bcrypt.compare(body.password, user.password);
-    if (match) {
-      const payload = {
-        sub: user.id,
-        exp: Math.floor(Date.now() / 1000) + 60 * 60, // Token expires in 60 minutes
-      };
-      const token = sign(payload, secret);
-      return c.json({ message: 'Login successful', token: token });
-    } else {
-      throw new HTTPException(401, { message: 'Invalid credentials' });
-    }
+    return c.json({ message: "Pokemon caught", data: caughtPokemon });
   } catch (error) {
-    throw new HTTPException(401, { message: 'Invalid credentials' });
+    console.error(error);
+    throw new HTTPException(500, { message: "Internal Server Error" });
   }
 });
 
-// Get user's caught Pokémon
-app.get('/protected/pokemons', async (c) => {
-  const payload = c.get('jwtPayload');
-  if (!payload) {
-    throw new HTTPException(401, { message: 'Unauthorized' });
-  }
-
-  const pokemons = await prisma.pokemon.findMany({
-    where: { userId: payload.sub },
-  });
-
-  return c.json({ data: pokemons });
-});
-
-// Create a new Pokémon
-app.post('/protected/pokemons', async (c) => {
-  const payload = c.get('jwtPayload');
-  if (!payload) {
-    throw new HTTPException(401, { message: 'Unauthorized' });
-  }
-
-  const body = await c.req.json();
-  const pokemon = await prisma.pokemon.create({
-    data: {
-      name: body.name,
-      type: body.type,
-      caughtBy: body.caughtBy,
-      userId: payload.sub,
-    },
-  });
-
-  return c.json({ data: pokemon }, 201);
-});
-
-// Update a Pokémon
-app.put('/protected/pokemons/:id', async (c) => {
-  const payload = c.get('jwtPayload');
-  if (!payload) {
-    throw new HTTPException(401, { message: 'Unauthorized' });
-  }
+// Endpoint to release Pokémon from the database
+app.delete("/protected/release/:id", async (c) => {
+  const payload = c.get("jwtPayload");
+  if (!payload) throw new HTTPException(401, { message: "YOU ARE UNAUTHORIZED" });
 
   const { id } = c.req.param();
-  const body = await c.req.json();
 
-  const pokemon = await prisma.pokemon.update({
-    where: { id },
-    data: {
-      name: body.name,
-      type: body.type,
-    },
-  });
+  try {
+    const deleteResult = await prisma.caughtPokemon.deleteMany({
+      where: { id, userId: payload.sub },
+    });
 
-  return c.json({ data: pokemon });
-});
+    if (deleteResult.count === 0) {
+      return c.json({ message: "Pokemon not found or not owned by user" }, 404);
+    }
 
-// Delete a Pokémon
-app.delete('/protected/pokemons/:id', async (c) => {
-  const payload = c.get('jwtPayload');
-  if (!payload) {
-    throw new HTTPException(401, { message: 'Unauthorized' });
+    return c.json({ message: "Pokemon is released" });
+  } catch (error: unknown) {
+    return c.json({ message: "An error occurred while releasing the Pokemon" }, 500);
   }
-
-  const { id } = c.req.param();
-  await prisma.pokemon.delete({
-    where: { id },
-  });
-
-  return c.text('Deleted');
 });
 
-// Pagination for Pokémon
-app.get('/pokemons', async (c) => {
-  const page = parseInt(c.req.query('page') || '1', 10);
-  const limit = parseInt(c.req.query('limit') || '10', 10);
-  const skip = (page - 1) * limit;
+// Endpoint to get the list of caught Pokémon
+app.get("/protected/caught", async (c) => {
+  const payload = c.get("jwtPayload");
+  if (!payload) throw new HTTPException(401, { message: "YOU ARE UNAUTHORIZED" });
 
-  const pokemons = await prisma.pokemon.findMany({
-    skip,
-    take: limit,
-  });
+  try {
+    const caughtPokemon = await prisma.caughtPokemon.findMany({
+      where: { userId: payload.sub },
+      include: { pokemon: true },
+    });
 
-  const total = await prisma.pokemon.count();
-  return c.json({ data: pokemons, total, page, limit });
-});
+    if (!caughtPokemon.length) {
+      return c.json({ message: "No Pokémon found." });
+    }
 
-// Get a single Pokémon by ID
-app.get('/pokemons/:id', async (c) => {
-  const { id } = c.req.param();
-  const pokemon = await prisma.pokemon.findUnique({
-    where: { id },
-  });
-
-  if (!pokemon) {
-    throw new HTTPException(404, { message: 'Pokemon not found' });
+    return c.json({ data: caughtPokemon });
+  } catch (error: unknown) {
+    console.error("Error fetching caught Pokémon:", error);
+    return c.json({ message: "An error occurred while fetching caught Pokémon" }, 500);
   }
-
-  return c.json({ data: pokemon });
 });
 
 export default app;

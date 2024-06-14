@@ -1,24 +1,33 @@
+// This is your Prisma schema file,
+// learn more about it in the docs: https://pris.ly/d/prisma-schema
+
 generator client {
   provider = "prisma-client-js"
 }
 
 datasource db {
-  provider = "mongodb"
+  provider = "sqlite"
   url      = env("DATABASE_URL")
 }
 
-model Pokemon {
-  id       String @id @default(auto()) @map("_id") @db.ObjectId
-  name     String
-  type     String
-  caughtBy String
-  userId   String @db.ObjectId
-  user     User   @relation(fields: [userId], references: [id])
+model User {
+  id             String     @id @default(uuid())
+  email          String     @unique
+  hashedPassword String
+  caughtPokemon  CaughtPokemon[]
 }
 
-model User {
-  id       String    @id @default(auto()) @map("_id") @db.ObjectId
-  email    String    @unique
-  password String
-  pokemons Pokemon[]
+model Pokemon {
+  id            String         @id @default(uuid())
+  name          String         @unique
+  caughtPokemon CaughtPokemon[]
+}
+
+model CaughtPokemon {
+  id        String   @id @default(uuid())
+  userId    String
+  user      User     @relation(fields: [userId], references: [id])
+  pokemonId String
+  pokemon   Pokemon  @relation(fields: [pokemonId], references: [id])
+  caughtAt  DateTime @default(now())
 }

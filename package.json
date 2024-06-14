@@ -4,6 +4,7 @@
   },
   "dependencies": {
     "@prisma/client": "^5.15.0",
+    "axios": "^1.7.2",
     "bcryptjs": "^2.4.3",
     "hono": "^4.4.4",
     "jsonwebtoken": "^9.0.2"
